@@ -10,19 +10,29 @@ import com.google.api.client.json.jackson2.JacksonFactory;
 import com.google.api.client.util.store.FileDataStoreFactory;
 import com.google.api.services.gmail.Gmail;
 import com.google.api.services.gmail.GmailScopes;
-import com.google.api.services.gmail.model.Label;
-import com.google.api.services.gmail.model.ListLabelsResponse;
+import com.google.api.services.gmail.model.ListMessagesResponse;
+import com.google.api.services.gmail.model.Message;
+import com.google.common.collect.HashMultimap;
+import com.google.common.collect.Multimap;
 
+import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.security.GeneralSecurityException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 
 public class Server implements Runnable, AutoCloseable {
@@ -37,7 +47,7 @@ public class Server implements Runnable, AutoCloseable {
         System.out.println("Listening for connection on port 8080 ....");
         while (true) {
             try (Server server = new Server(serverSocket.accept())) {
-                Thread thread = new Thread(server);
+                java.lang.Thread thread = new java.lang.Thread(server);
                 thread.start();
                 thread.join();
             }
@@ -47,10 +57,17 @@ public class Server implements Runnable, AutoCloseable {
     @Override
     public void run() {
         Gmail service = getGmailService("email-tagging");
-        List<Label> labels = getGmailLabels(service, "me");
-
-        String labelsOutput = getLabelsOutput(labels);
-        String httpResponse = "HTTP/1.1 200 OK\r\n\r\n" + labelsOutput;
+        Multimap<Message, IssueType> badMessagesWithIssueTypes = HashMultimap.create();
+        try {
+            getGmailMessages(service,
+                            "me",
+                            getAttachmentsQuery("/code-file-extensions.txt"))
+                    .forEach(message -> badMessagesWithIssueTypes.put(message, IssueType.POTENTIAL_CODE_FILE_ATTACHED));
+        } catch (IOException e) {
+            // Do nothing
+        }
+        String messagesOutput = getMessagesOutput(badMessagesWithIssueTypes);
+        String httpResponse = "HTTP/1.1 200 OK\r\n\r\n" + messagesOutput;
         try {
             connect.getOutputStream().write(httpResponse.getBytes(StandardCharsets.UTF_8));
         } catch (IOException e) {
@@ -58,32 +75,66 @@ public class Server implements Runnable, AutoCloseable {
         }
     }
 
-    private String getLabelsOutput(List<Label> labels) {
-        if (labels.isEmpty()) {
-            return "No labels found.";
+    private String getMessagesOutput(Multimap<Message, IssueType> messagesWithIssueTypes) {
+        Set<Message> messages = messagesWithIssueTypes.keySet();
+        if (messages.isEmpty()) {
+            return "No messages found.";
         } else {
-            StringBuilder sb = new StringBuilder("Labels:");
-            for (Label label : labels) {
+            StringBuilder sb = new StringBuilder("Messages:");
+            sb.append("\nTotal Bad Message Count: ");
+            sb.append(messages.size());
+            sb.append("\nBad Message Count by Type: ");
+            Map<IssueType, Long> issueTypesWithCounts = messagesWithIssueTypes.values().stream().collect(Collectors.groupingBy(Function.identity(), Collectors.counting()));
+            issueTypesWithCounts.forEach((issueType, count) -> {
+                sb.append("\n");
+                sb.append(issueType);
+                sb.append(": ");
+                sb.append(count);
+            });
+            sb.append("\nNote that a message may have more than one bad message type, " +
+                    "so the sum of these counts may total more than the total count");
+            for (Message message : messages) {
                 sb.append("\n- ");
-                sb.append(label.getName());
+                sb.append(message.getId());
+                sb.append(": ");
+                sb.append(messagesWithIssueTypes.get(message));
             }
             return sb.toString();
         }
     }
 
-    /**
-     * Get the labels in the user's gmail account
-     * @param service from which to retrieve labels
-     * @param user to retrieve labels for
-     * @return Retrieved labels or an empty list if there are none or there is an IOException while retrieving the labels
-     */
-    private List<Label> getGmailLabels(Gmail service, String user) {
+    private List<Message> getGmailMessages(Gmail service, String user, String query) {
+        List<Message> messages = new ArrayList<>();
+        // Initial null gets first page
+        String pageToken = null;
         try {
-            ListLabelsResponse listResponse = service.users().labels().list(user).execute();
-            return listResponse.getLabels();
+            do {
+                ListMessagesResponse messagesResponse = service.users()
+                        .messages()
+                        .list(user)
+                        .setIncludeSpamTrash(true)
+                        .setQ(query)
+                        .setPageToken(pageToken)
+                        .execute();
+                messages.addAll(messagesResponse.getMessages());
+                pageToken = messagesResponse.getNextPageToken();
+            } while (pageToken != null);
+            return messages;
         } catch (IOException e) {
-            return Collections.emptyList();
+            e.printStackTrace();
+            return messages;
         }
+    }
+
+    private String getAttachmentsQuery(String fileExtensionsFilePath) throws IOException {
+        URL fileUrl = Server.class.getResource(fileExtensionsFilePath);
+        if (fileUrl == null) {
+            throw new FileNotFoundException("Resource not found: " + fileExtensionsFilePath);
+        }
+        return Files.readAllLines(new File(fileUrl.getFile()).toPath())
+                .stream()
+                .map(extension -> "filename:" + extension)
+                .collect(Collectors.joining(" OR "));
     }
 
     private Gmail getGmailService(String applicationName) {
@@ -109,16 +160,16 @@ public class Server implements Runnable, AutoCloseable {
      * Global instance of the scopes required by this quickstart.
      * If modifying these scopes, delete your previously saved tokens/ folder.
      */
-    private static final List<String> SCOPES = Collections.singletonList(GmailScopes.GMAIL_LABELS);
+    private static final List<String> SCOPES = Collections.singletonList(GmailScopes.GMAIL_READONLY);
     private static final String CREDENTIALS_FILE_PATH = "/credentials.json";
 
     /**
      * Creates an authorized Credential object.
-     * @param HTTP_TRANSPORT The network HTTP Transport.
+     * @param httpTransport The network HTTP Transport.
      * @return An authorized Credential object.
      * @throws IOException If the credentials.json file cannot be found.
      */
-    private static Credential getCredentials(final NetHttpTransport HTTP_TRANSPORT) throws IOException {
+    private static Credential getCredentials(final NetHttpTransport httpTransport) throws IOException {
         // Load client secrets.
         InputStream in = Server.class.getResourceAsStream(CREDENTIALS_FILE_PATH);
         if (in == null) {
@@ -128,12 +179,17 @@ public class Server implements Runnable, AutoCloseable {
 
         // Build flow and trigger user authorization request.
         GoogleAuthorizationCodeFlow flow = new GoogleAuthorizationCodeFlow.Builder(
-                HTTP_TRANSPORT, JSON_FACTORY, clientSecrets, SCOPES)
+                httpTransport, JSON_FACTORY, clientSecrets, SCOPES)
                 .setDataStoreFactory(new FileDataStoreFactory(new java.io.File(TOKENS_DIRECTORY_PATH)))
                 .setAccessType("offline")
                 .build();
         LocalServerReceiver receiver = new LocalServerReceiver.Builder().setPort(8888).build();
-        return new AuthorizationCodeInstalledApp(flow, receiver).authorize("user");
+        return new AuthorizationCodeInstalledApp(flow, receiver).authorize("me");
+    }
+
+    enum IssueType {
+        POTENTIAL_CODE_FILE_ATTACHED,
+        ;
     }
 
 }
