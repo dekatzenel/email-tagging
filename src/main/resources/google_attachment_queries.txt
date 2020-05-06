@@ -1,0 +1,4 @@
+has:drive
+has:document
+has:spreadsheet
+has:presentation
