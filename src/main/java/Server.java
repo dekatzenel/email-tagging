@@ -35,7 +35,7 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
- * Implements a sever that
+ * Implements a sever that allows a user to check for emails that may contain links to file sharing websites
  */
 public class Server implements Runnable, AutoCloseable {
     private final Socket connect;
@@ -62,6 +62,7 @@ public class Server implements Runnable, AutoCloseable {
         Multimap<Message, IssueType> badMessagesWithIssueTypes = HashMultimap.create();
         String userId = "me";
         try {
+            // Get emails with Google Drive attachments
             getGmailMessages(service,
                     userId,
                     getAttachmentsQuery("/google_attachment_queries.txt")
@@ -71,6 +72,7 @@ public class Server implements Runnable, AutoCloseable {
             e.printStackTrace();
         }
         try {
+            // Get emails with links to popular file sharing services
             getGmailMessages(service,
                     userId,
                     getAttachmentsQuery("/file_sharing_link_matches.txt")
@@ -88,6 +90,11 @@ public class Server implements Runnable, AutoCloseable {
         }
     }
 
+    /**
+     * Construct a user-friendly output string describing the found messages
+     * @param messagesWithIssueTypes the messages to include in the string with their issue type(s)
+     * @return the output string
+     */
     private String getMessagesOutput(Multimap<Message, IssueType> messagesWithIssueTypes) {
         Set<Message> messages = messagesWithIssueTypes.keySet();
         if (messages.isEmpty()) {
@@ -116,6 +123,13 @@ public class Server implements Runnable, AutoCloseable {
         }
     }
 
+    /**
+     * Run search using the Gmail API
+     * @param service connection to Gmail
+     * @param user user to validate
+     * @param query search query
+     * @return messages from the user matching the query
+     */
     private List<Message> getGmailMessages(Gmail service, String user, String query) {
         List<Message> messages = new ArrayList<>();
         // Initial null gets first page
