@@ -7,6 +7,8 @@ import com.google.api.client.googleapis.javanet.GoogleNetHttpTransport;
 import com.google.api.client.http.javanet.NetHttpTransport;
 import com.google.api.client.json.JsonFactory;
 import com.google.api.client.json.jackson2.JacksonFactory;
+import com.google.api.client.util.Base64;
+import com.google.api.client.util.StringUtils;
 import com.google.api.client.util.store.FileDataStoreFactory;
 import com.google.api.services.gmail.Gmail;
 import com.google.api.services.gmail.GmailScopes;
@@ -14,6 +16,7 @@ import com.google.api.services.gmail.model.ListMessagesResponse;
 import com.google.api.services.gmail.model.Message;
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.Multimap;
+import javafx.util.Pair;
 
 import java.io.File;
 import java.io.FileNotFoundException;
@@ -58,14 +61,44 @@ public class Server implements Runnable, AutoCloseable {
     public void run() {
         Gmail service = getGmailService("email-tagging");
         Multimap<Message, IssueType> badMessagesWithIssueTypes = HashMultimap.create();
+        String userId = "me";
         try {
             getGmailMessages(service,
-                            "me",
-                            getAttachmentsQuery("/code-file-extensions.txt"))
+                    userId,
+                    getAttachmentsQuery("/code-file-extensions.txt"),
+                    Function.identity())
                     .forEach(message -> badMessagesWithIssueTypes.put(message, IssueType.POTENTIAL_CODE_FILE_ATTACHED));
         } catch (IOException e) {
-            // Do nothing
+            e.printStackTrace();
         }
+        Function<List<Message>, List<Message>> filterCodeSnippetsInline = allMessages -> allMessages.stream()
+                .map(message -> {
+                    try {
+                        return new Pair<>(message,
+                                StringUtils.newStringUtf8(Base64.decodeBase64(service.users()
+                                        .messages()
+                                        .get(userId, message.getId())
+                                        .setFormat("raw")
+                                        .execute()
+                                        .getRaw())));
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                        return new Pair<>(message, "");
+                    }
+                })
+                .filter(messageAndText -> {
+                    String messageText = messageAndText.getValue();
+                    return messageText.matches(".*[`]+.*[`]+.*")
+                        || messageText.matches(".*[{]{2}.*[}]{2}.*")
+                        || messageText.matches(".*[{]code[}]");
+                })
+                .map(Pair::getKey)
+                .collect(Collectors.toList());
+            getGmailMessages(service,
+                    userId,
+                    "",
+                    filterCodeSnippetsInline)
+                    .forEach(message -> badMessagesWithIssueTypes.put(message, IssueType.POTENTIAL_CODE_SNIPPET_INLINE));
         String messagesOutput = getMessagesOutput(badMessagesWithIssueTypes);
         String httpResponse = "HTTP/1.1 200 OK\r\n\r\n" + messagesOutput;
         try {
@@ -103,7 +136,7 @@ public class Server implements Runnable, AutoCloseable {
         }
     }
 
-    private List<Message> getGmailMessages(Gmail service, String user, String query) {
+    private List<Message> getGmailMessages(Gmail service, String user, String query, Function<List<Message>, List<Message>> postfilter) {
         List<Message> messages = new ArrayList<>();
         // Initial null gets first page
         String pageToken = null;
@@ -116,7 +149,8 @@ public class Server implements Runnable, AutoCloseable {
                         .setQ(query)
                         .setPageToken(pageToken)
                         .execute();
-                messages.addAll(messagesResponse.getMessages());
+
+                messages.addAll(postfilter.apply(messagesResponse.getMessages()));
                 pageToken = messagesResponse.getNextPageToken();
             } while (pageToken != null);
             return messages;
@@ -189,6 +223,7 @@ public class Server implements Runnable, AutoCloseable {
 
     enum IssueType {
         POTENTIAL_CODE_FILE_ATTACHED,
+        POTENTIAL_CODE_SNIPPET_INLINE,
         ;
     }
 
