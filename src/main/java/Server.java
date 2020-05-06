@@ -34,7 +34,9 @@ import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
-
+/**
+ * Implements a sever that
+ */
 public class Server implements Runnable, AutoCloseable {
     private final Socket connect;
 
