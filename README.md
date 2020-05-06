@@ -6,6 +6,8 @@ Requirements:
 - Gradle >= 2.3 (http://gradle.org/downloads)
 - A Google account with Gmail enabled
 
+Before running this project for the first time, run `gradle wrapper` from the root directory.
+
 To run this program, invoke `./gradlew run` from the root directory
 
 To access this program once it is running, navigate your web browser to <localhost:8080>
